@@ -18,7 +18,7 @@ Please run these locally before pushing your code to avoid CI failures:
 
 \* \*\*Format:\*\* `cargo fmt --all -- --check`
 
-\* \*\*Linting:\*\* `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+\* \*\*Linting:\*\* `cargo clippy --workspace --all-targets --all-features`
 
 \* \*\*Tests:\*\* `cargo test --workspace --all-features --locked`
 
