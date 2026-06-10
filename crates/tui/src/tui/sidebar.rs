@@ -767,21 +767,22 @@ fn task_panel_lines(app: &App, content_width: usize, max_rows: usize) -> Vec<Lin
     let theme = &app.ui_theme;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(max_rows.max(4));
 
-    if let Some(turn_id) = app.runtime_turn_id.as_ref() {
+    if app.runtime_turn_id.is_some() {
         let status = app
             .runtime_turn_status
             .as_deref()
             .unwrap_or("unknown")
             .to_string();
-        // Show enough of the turn id prefix to identify it for
-        // task_read / task_cancel. A UUID needs ~13 chars before the
-        // first hyphen; 16 chars gives a safe prefix for disambiguation.
-        let turn_prefix = truncate_line_to_width(turn_id, 16);
+        // #3030: Use a stable turn number ("Turn 1") instead of the raw
+        // UUID prefix.  The full UUID is preserved in the hover text
+        // (task_panel_hover_texts) for inspection.
+        let turn_label = if app.turn_counter > 0 {
+            format!("Turn {} ({status})", app.turn_counter)
+        } else {
+            format!("Current turn ({status})")
+        };
         lines.push(Line::from(Span::styled(
-            truncate_line_to_width(
-                &format!("turn {turn_prefix} ({status})",),
-                content_width.max(1),
-            ),
+            truncate_line_to_width(&turn_label, content_width.max(1)),
             Style::default().fg(theme.accent_primary),
         )));
     }
@@ -1834,9 +1835,16 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                         .map(summarize_tool_output)
                         .filter(|summary| !summary.trim().is_empty())
                 });
+            // #3030: Prefer stable label ("Agent 1") > nickname > raw name.
+            let display_name = app
+                .agent_label_map
+                .get(&agent.agent_id)
+                .cloned()
+                .or_else(|| agent.nickname.clone())
+                .unwrap_or_else(|| agent.name.clone());
             SidebarAgentRow {
                 id: agent.agent_id.clone(),
-                name: agent.nickname.clone().unwrap_or_else(|| agent.name.clone()),
+                name: display_name,
                 role: agent.agent_type.as_str().to_string(),
                 status: subagent_status_text(&agent.status).to_string(),
                 git_branch: agent.git_branch.clone(),
@@ -1856,17 +1864,25 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
         app.agent_progress
             .iter()
             .filter(|(id, _)| !cached_ids.contains(id.as_str()))
-            .map(|(id, progress)| SidebarAgentRow {
-                id: id.clone(),
-                name: id.clone(),
-                role: "agent".to_string(),
-                status: "running".to_string(),
-                git_branch: None,
-                progress: Some(progress.clone()),
-                steps_taken: 0,
-                duration_ms: app.agent_activity_started_at.map(|started| {
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-                }),
+            .map(|(id, progress)| {
+                // #3030: Prefer stable label for progress-only agents too.
+                let display_name = app
+                    .agent_label_map
+                    .get(id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| id.clone());
+                SidebarAgentRow {
+                    id: id.clone(),
+                    name: display_name,
+                    role: "agent".to_string(),
+                    status: "running".to_string(),
+                    git_branch: None,
+                    progress: Some(progress.clone()),
+                    steps_taken: 0,
+                    duration_ms: app.agent_activity_started_at.map(|started| {
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                    }),
+                }
             }),
     );
 

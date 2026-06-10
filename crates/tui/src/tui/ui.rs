@@ -1791,6 +1791,7 @@ async fn run_event_loop(
                         }
                         app.runtime_turn_id = Some(turn_id);
                         app.runtime_turn_status = Some("in_progress".to_string());
+                        app.turn_counter = app.turn_counter.saturating_add(1);
                         app.reasoning_buffer.clear();
                         app.reasoning_header = None;
                         app.last_reasoning = None;
@@ -2300,6 +2301,12 @@ async fn run_event_loop(
                             .insert(id.clone(), format!("starting: {prompt_summary}"));
                         if app.agent_activity_started_at.is_none() {
                             app.agent_activity_started_at = Some(Instant::now());
+                        }
+                        // #3030: Assign a stable user-facing label for this agent.
+                        if !app.agent_label_map.contains_key(&id) {
+                            app.agent_counter = app.agent_counter.saturating_add(1);
+                            app.agent_label_map
+                                .insert(id.clone(), format!("Agent {}", app.agent_counter));
                         }
                         app.status_message =
                             Some(format!("Sub-agent {id} starting: {prompt_summary}"));

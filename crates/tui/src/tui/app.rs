@@ -1445,6 +1445,13 @@ pub struct App {
     pub pending_subagent_dispatch: Option<String>,
     /// Animation anchor for status-strip active sub-agent spinner.
     pub agent_activity_started_at: Option<Instant>,
+    /// Monotonic counter for stable agent labels (#3030).
+    /// Incremented each time a sub-agent is spawned; used to generate
+    /// "Agent 1", "Agent 2", etc.
+    pub agent_counter: u64,
+    /// Maps raw agent_id to a stable user-facing label (#3030).
+    /// Populated when `AgentSpawned` fires; read by sidebar rendering.
+    pub agent_label_map: HashMap<String, String>,
     pub ui_theme: UiTheme,
     /// Active named theme. Drives the cell-level color remap in
     /// `tui::color_compat::ColorCompatBackend` so community presets
@@ -1628,6 +1635,9 @@ pub struct App {
     pub runtime_turn_id: Option<String>,
     /// Current runtime turn status (if known).
     pub runtime_turn_status: Option<String>,
+    /// Monotonic turn counter for stable user-facing labels (#3030).
+    /// Incremented each time a new turn starts; displayed as "Turn N".
+    pub turn_counter: u64,
     /// When the UI accepted a user message but has not observed `TurnStarted` yet.
     pub dispatch_started_at: Option<Instant>,
 
@@ -2174,6 +2184,8 @@ impl App {
             last_fanout_card_index: None,
             pending_subagent_dispatch: None,
             agent_activity_started_at: None,
+            agent_counter: 0,
+            agent_label_map: HashMap::new(),
             ui_theme,
             theme_id,
             onboarding,
@@ -2262,6 +2274,7 @@ impl App {
             last_balance_fetch: None,
             runtime_turn_id: None,
             runtime_turn_status: None,
+            turn_counter: 0,
             dispatch_started_at: None,
             workspace_context: None,
             workspace_context_cell: std::sync::Arc::new(std::sync::Mutex::new(None)),
