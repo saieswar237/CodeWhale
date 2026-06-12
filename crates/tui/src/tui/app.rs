@@ -174,14 +174,15 @@ pub struct TurnCacheRecord {
     pub recorded_at: Instant,
 }
 
-/// DeepSeek reasoning-effort tier, mirrored on ChatGPT/Claude effort pickers.
+/// Reasoning-effort tier, mirrored across DeepSeek and Codex effort pickers.
 ///
 /// The config file accepts all five string values for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
-/// `Low`/`Medium` → `high`. OpenAI Codex displays and sends `Max` as
-/// `xhigh` at the provider boundary. The
-/// keyboard cycler (Shift+Tab) walks only the three behaviorally distinct
-/// tiers: `Off` → `High` → `Max` → `Off`.
+/// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
+/// `Off` to `Low` and displays/sends `Max` as `xhigh` at the provider
+/// boundary. The default keyboard cycler walks the three DeepSeek-distinct
+/// tiers: `Off` → `High` → `Max` → `Off`; provider-aware callers should use
+/// [`ReasoningEffort::cycle_next_for_provider`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
     Off,
@@ -238,7 +239,10 @@ impl ReasoningEffort {
     /// Provider-facing label for user-visible surfaces.
     #[must_use]
     pub fn display_label_for_provider(self, provider: ApiProvider) -> &'static str {
-        match (provider, self) {
+        match (provider, self.normalize_for_provider(provider)) {
+            (ApiProvider::OpenaiCodex, Self::Low) => "low",
+            (ApiProvider::OpenaiCodex, Self::Medium) => "medium",
+            (ApiProvider::OpenaiCodex, Self::High) => "high",
             (ApiProvider::OpenaiCodex, Self::Max) => "xhigh",
             (_, effort) => effort.short_label(),
         }
@@ -252,6 +256,39 @@ impl ReasoningEffort {
         Some(self.as_setting())
     }
 
+    #[must_use]
+    pub fn normalize_for_provider(self, provider: ApiProvider) -> Self {
+        if provider != ApiProvider::OpenaiCodex {
+            return self;
+        }
+        match self {
+            Self::Off => Self::Low,
+            Self::Auto => Self::Medium,
+            other => other,
+        }
+    }
+
+    #[must_use]
+    pub fn api_value_for_provider(self, provider: ApiProvider) -> Option<&'static str> {
+        if provider != ApiProvider::OpenaiCodex {
+            return self.api_value();
+        }
+        Some(match self.normalize_for_provider(provider) {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "xhigh",
+            Self::Off => "low",
+            Self::Auto => "medium",
+        })
+    }
+
+    #[must_use]
+    pub fn as_setting_for_provider(self, provider: ApiProvider) -> &'static str {
+        self.api_value_for_provider(provider)
+            .unwrap_or_else(|| self.as_setting())
+    }
+
     /// Cycle through the three behaviorally distinct tiers.
     #[must_use]
     pub fn cycle_next(self) -> Self {
@@ -260,6 +297,20 @@ impl ReasoningEffort {
             Self::Auto => Self::Off,
             Self::Low | Self::Medium | Self::High => Self::Max,
             Self::Max => Self::Off,
+        }
+    }
+
+    #[must_use]
+    pub fn cycle_next_for_provider(self, provider: ApiProvider) -> Self {
+        if provider != ApiProvider::OpenaiCodex {
+            return self.cycle_next();
+        }
+        match self.normalize_for_provider(provider) {
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Max,
+            Self::Max => Self::Low,
+            Self::Off | Self::Auto => Self::Low,
         }
     }
 }
@@ -1102,6 +1153,28 @@ pub enum HuntVerdict {
     Hunted,
     Wounded,
     Escaped,
+}
+
+impl HuntVerdict {
+    #[must_use]
+    pub fn goal_status(self) -> crate::tools::goal::GoalStatus {
+        match self {
+            Self::Hunting => crate::tools::goal::GoalStatus::Active,
+            Self::Hunted => crate::tools::goal::GoalStatus::Complete,
+            Self::Wounded => crate::tools::goal::GoalStatus::Paused,
+            Self::Escaped => crate::tools::goal::GoalStatus::Blocked,
+        }
+    }
+
+    #[must_use]
+    pub fn from_goal_status(status: crate::tools::goal::GoalStatus) -> Self {
+        match status {
+            crate::tools::goal::GoalStatus::Active => Self::Hunting,
+            crate::tools::goal::GoalStatus::Paused => Self::Wounded,
+            crate::tools::goal::GoalStatus::Complete => Self::Hunted,
+            crate::tools::goal::GoalStatus::Blocked => Self::Escaped,
+        }
+    }
 }
 
 /// Hunt tracking state (#2092 — was GoalState).
@@ -2481,10 +2554,11 @@ impl App {
         let _ = self.set_mode(next);
     }
 
-    /// Cycle reasoning-effort through the three behaviorally distinct tiers:
-    /// `Off` → `High` → `Max` → `Off`.
+    /// Cycle reasoning-effort through the active provider's distinct tiers.
     pub fn cycle_effort(&mut self) {
-        self.reasoning_effort = self.reasoning_effort.cycle_next();
+        self.reasoning_effort = self
+            .reasoning_effort
+            .cycle_next_for_provider(self.api_provider);
         self.last_effective_reasoning_effort = None;
         self.needs_redraw = true;
         self.push_status_toast(
@@ -5021,6 +5095,10 @@ impl App {
         self.last_effective_reasoning_effort = None;
         if auto_model {
             self.reasoning_effort = ReasoningEffort::Auto;
+        } else {
+            self.reasoning_effort = self
+                .reasoning_effort
+                .normalize_for_provider(self.api_provider);
         }
     }
 
@@ -5382,6 +5460,14 @@ mod tests {
     #[test]
     fn reasoning_effort_display_label_uses_codex_xhigh() {
         assert_eq!(
+            ReasoningEffort::Off.display_label_for_provider(ApiProvider::OpenaiCodex),
+            "low"
+        );
+        assert_eq!(
+            ReasoningEffort::Medium.display_label_for_provider(ApiProvider::OpenaiCodex),
+            "medium"
+        );
+        assert_eq!(
             ReasoningEffort::Max.display_label_for_provider(ApiProvider::OpenaiCodex),
             "xhigh"
         );
@@ -5403,6 +5489,43 @@ mod tests {
         app.reasoning_effort = ReasoningEffort::Auto;
         app.last_effective_reasoning_effort = Some(ReasoningEffort::Max);
         assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
+    }
+
+    #[test]
+    fn reasoning_effort_api_values_are_provider_aware_for_codex() {
+        assert_eq!(
+            ReasoningEffort::Off.normalize_for_provider(ApiProvider::OpenaiCodex),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            ReasoningEffort::Auto.normalize_for_provider(ApiProvider::OpenaiCodex),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            ReasoningEffort::Max.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("xhigh")
+        );
+        assert_eq!(
+            ReasoningEffort::Off.api_value_for_provider(ApiProvider::OpenaiCodex),
+            Some("low")
+        );
+        assert_eq!(
+            ReasoningEffort::Max.api_value_for_provider(ApiProvider::Deepseek),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn set_model_selection_normalizes_codex_fixed_model_effort() {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.reasoning_effort = ReasoningEffort::Off;
+
+        app.set_model_selection("gpt-5.5-codex".to_string());
+
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert!(!app.auto_model);
+        assert_eq!(app.reasoning_effort_display_label(), "low");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::client::DeepSeekClient;
-use crate::config::Config;
+use crate::config::{ApiProvider, Config};
 use crate::llm_client::LlmClient;
 use crate::models::{ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt};
 use crate::tui::app::ReasoningEffort;
@@ -322,6 +322,17 @@ fn parse_auto_route_reasoning_effort(effort: &str) -> Option<ReasoningEffort> {
 
 #[must_use]
 pub(crate) fn normalize_auto_route_effort(effort: ReasoningEffort) -> ReasoningEffort {
+    normalize_auto_route_effort_for_provider(ApiProvider::Deepseek, effort)
+}
+
+#[must_use]
+pub(crate) fn normalize_auto_route_effort_for_provider(
+    provider: ApiProvider,
+    effort: ReasoningEffort,
+) -> ReasoningEffort {
+    if provider == ApiProvider::OpenaiCodex {
+        return effort.normalize_for_provider(provider);
+    }
     match effort {
         ReasoningEffort::Low | ReasoningEffort::Medium => ReasoningEffort::High,
         other => other,
@@ -347,13 +358,13 @@ pub(crate) async fn resolve_auto_route_with_flash(
         &candidates,
     );
     if heuristic.confidence == AutoModelHeuristicConfidence::Decisive {
-        return auto_route_from_heuristic(latest_request, heuristic);
+        return auto_route_from_heuristic(config.api_provider(), latest_request, heuristic);
     }
 
     // #1549/#3018: no cheap tier → no network round-trip. The heuristic is
     // the only signal and the routed model stays on the session model.
     if candidates.cheap.is_none() {
-        return auto_route_from_heuristic(latest_request, heuristic);
+        return auto_route_from_heuristic(config.api_provider(), latest_request, heuristic);
     }
 
     match auto_route_flash_recommendation(
@@ -371,20 +382,23 @@ pub(crate) async fn resolve_auto_route_with_flash(
             reasoning_effort: recommendation.reasoning_effort,
             source: AutoRouteSource::FlashRouter,
         },
-        Ok(None) | Err(_) => auto_route_from_heuristic(latest_request, heuristic),
+        Ok(None) | Err(_) => {
+            auto_route_from_heuristic(config.api_provider(), latest_request, heuristic)
+        }
     }
 }
 
 fn auto_route_from_heuristic(
+    provider: ApiProvider,
     latest_request: &str,
     heuristic: AutoModelHeuristicSelection,
 ) -> AutoRouteSelection {
     AutoRouteSelection {
         model: heuristic.model,
-        reasoning_effort: Some(normalize_auto_route_effort(crate::auto_reasoning::select(
-            false,
-            latest_request,
-        ))),
+        reasoning_effort: Some(normalize_auto_route_effort_for_provider(
+            provider,
+            crate::auto_reasoning::select(false, latest_request),
+        )),
         source: AutoRouteSource::Heuristic,
     }
 }
@@ -629,6 +643,42 @@ mod tests {
 
         assert_eq!(rec.model, "deepseek-v4-pro");
         assert_eq!(rec.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn auto_route_effort_normalization_is_provider_aware() {
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(ApiProvider::Deepseek, ReasoningEffort::Low),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::Deepseek,
+                ReasoningEffort::Medium
+            ),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::OpenaiCodex,
+                ReasoningEffort::Low
+            ),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::OpenaiCodex,
+                ReasoningEffort::Medium
+            ),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            normalize_auto_route_effort_for_provider(
+                ApiProvider::OpenaiCodex,
+                ReasoningEffort::Off
+            ),
+            ReasoningEffort::Low
+        );
     }
 
     #[test]

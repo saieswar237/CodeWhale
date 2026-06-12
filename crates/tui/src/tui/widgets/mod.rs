@@ -2865,7 +2865,11 @@ mod tests {
         let rendered = buffer_text(&buf, area);
 
         assert_eq!(app.collapsed_cell_map, vec![0]);
-        assert!(rendered.contains("3 tools"), "{rendered}");
+        assert!(
+            rendered.contains("Explored 2 files, 1 search"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("activity_group"), "{rendered}");
         assert!(
             !rendered.contains("full output from list_dir"),
             "{rendered}"

@@ -39,7 +39,7 @@ use crate::models::{
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
 use crate::seam_manager::{SeamConfig, SeamManager};
-use crate::tools::goal::{SharedGoalState, new_shared_goal_state};
+use crate::tools::goal::{GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state};
 use crate::tools::plan::{PlanSnapshot, SharedPlanState, new_shared_plan_state};
 use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::spec::RuntimeToolServices;
@@ -326,6 +326,8 @@ pub struct EngineConfig {
     pub speech_output_dir: Option<PathBuf>,
     pub vision_config: Option<crate::config::VisionModelConfig>,
     pub goal_objective: Option<String>,
+    pub goal_token_budget: Option<u32>,
+    pub goal_status: GoalStatus,
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
@@ -416,6 +418,8 @@ impl Default for EngineConfig {
             vision_config: None,
             strict_tool_mode: false,
             goal_objective: None,
+            goal_token_budget: None,
+            goal_status: GoalStatus::Active,
             allowed_tools: None,
             disallowed_tools: None,
             hook_executor: None,
@@ -654,7 +658,12 @@ impl Engine {
         crate::tls::ensure_rustls_crypto_provider();
 
         if let Some(objective) = normalized_goal_objective(config.goal_objective.as_deref()) {
-            sync_goal_state_from_host(&config.goal_state, Some(&objective), None, false);
+            sync_goal_state_from_host(
+                &config.goal_state,
+                Some(&objective),
+                config.goal_token_budget,
+                config.goal_status,
+            );
         }
 
         let (tx_op, rx_op) = mpsc::channel(32);
@@ -1099,6 +1108,8 @@ impl Engine {
                     mode,
                     model,
                     goal_objective,
+                    goal_token_budget,
+                    goal_status,
                     reasoning_effort,
                     reasoning_effort_auto,
                     auto_model,
@@ -1116,6 +1127,8 @@ impl Engine {
                         mode,
                         model,
                         goal_objective,
+                        goal_token_budget,
+                        goal_status,
                         reasoning_effort,
                         reasoning_effort_auto,
                         auto_model,
@@ -1373,6 +1386,8 @@ impl Engine {
                         mode,
                         self.session.model.clone(),
                         self.config.goal_objective.clone(),
+                        self.config.goal_token_budget,
+                        self.config.goal_status,
                         self.session.reasoning_effort.clone(),
                         self.session.reasoning_effort_auto,
                         self.session.auto_model,
@@ -1415,6 +1430,25 @@ impl Engine {
                 workspace: self.session.workspace.clone(),
             })
             .await;
+    }
+
+    fn goal_snapshot_for_event(&self) -> Option<GoalSnapshot> {
+        match self.config.goal_state.lock() {
+            Ok(state) => {
+                let snapshot = state.snapshot();
+                snapshot.objective.is_some().then_some(snapshot)
+            }
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned while emitting goal update: {err}");
+                None
+            }
+        }
+    }
+
+    async fn emit_goal_updated(&self) {
+        if let Some(snapshot) = self.goal_snapshot_for_event() {
+            let _ = self.tx_event.send(Event::GoalUpdated { snapshot }).await;
+        }
     }
 
     async fn add_session_message(&mut self, message: Message) {
@@ -1527,6 +1561,8 @@ impl Engine {
         mode: AppMode,
         model: String,
         goal_objective: Option<String>,
+        goal_token_budget: Option<u32>,
+        goal_status: GoalStatus,
         reasoning_effort: Option<String>,
         reasoning_effort_auto: bool,
         auto_model: bool,
@@ -1641,18 +1677,24 @@ impl Engine {
         self.session.add_message(user_msg);
 
         let previous_goal_objective = self.config.goal_objective.clone();
+        let previous_goal_token_budget = self.config.goal_token_budget;
+        let previous_goal_status = self.config.goal_status;
 
         self.session.model = model;
         self.config.model.clone_from(&self.session.model);
         self.config.goal_objective = goal_objective.clone();
+        self.config.goal_token_budget = goal_token_budget;
+        self.config.goal_status = goal_status;
         if normalized_goal_objective(previous_goal_objective.as_deref())
             != normalized_goal_objective(goal_objective.as_deref())
+            || previous_goal_token_budget != goal_token_budget
+            || previous_goal_status != goal_status
         {
             sync_goal_state_from_host(
                 &self.config.goal_state,
                 normalized_goal_objective(goal_objective.as_deref()).as_deref(),
-                None,
-                false,
+                goal_token_budget,
+                goal_status,
             );
         }
         self.config.allowed_tools = allowed_tools;
@@ -1868,6 +1910,7 @@ impl Engine {
 
         // Emit turn complete event — after all post-turn bookkeeping so
         // the terminal is immediately responsive when the UI receives it.
+        self.emit_goal_updated().await;
         let _ = self
             .tx_event
             .send(Event::TurnComplete {
@@ -2605,10 +2648,10 @@ fn sync_goal_state_from_host(
     goal_state: &SharedGoalState,
     objective: Option<&str>,
     token_budget: Option<u32>,
-    completed: bool,
+    status: GoalStatus,
 ) {
     match goal_state.lock() {
-        Ok(mut state) => state.sync_from_host(objective, token_budget, completed),
+        Ok(mut state) => state.sync_from_host_status(objective, token_budget, status),
         Err(err) => tracing::warn!("goal state lock poisoned while syncing host goal: {err}"),
     }
 }

@@ -220,12 +220,15 @@ impl HotbarAction for AppHotbarAction {
                 if app.auto_model {
                     bail!("Reasoning effort is controlled by auto model routing.");
                 }
-                app.reasoning_effort = app.reasoning_effort.cycle_next();
+                app.reasoning_effort = app
+                    .reasoning_effort
+                    .cycle_next_for_provider(app.api_provider);
                 app.last_effective_reasoning_effort = None;
                 app.update_model_compaction_budget();
                 app.status_message = Some(format!(
                     "Reasoning effort: {}",
-                    app.reasoning_effort.as_setting()
+                    app.reasoning_effort
+                        .display_label_for_provider(app.api_provider)
                 ));
                 Ok(HotbarDispatch::AppAction(AppAction::UpdateCompaction(
                     app.compaction_config(),
@@ -281,7 +284,7 @@ impl HotbarAction for AppHotbarAction {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::config::Config;
+    use crate::config::{ApiProvider, Config};
     use crate::tui::app::{ReasoningEffort, TuiOptions};
     use crate::tui::views::ModalKind;
 
@@ -430,6 +433,34 @@ mod tests {
         app.auto_model = true;
         assert!(!reasoning.is_active(&app));
         assert!(reasoning.dispatch(&mut app).is_err());
+    }
+
+    #[test]
+    fn reasoning_cycle_uses_codex_effort_tiers() {
+        let registry = HotbarActionRegistry::with_builtins();
+        let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
+        let mut app = test_app();
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::Low;
+
+        for (expected_effort, expected_label) in [
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Max, "xhigh"),
+            (ReasoningEffort::Low, "low"),
+        ] {
+            assert!(matches!(
+                reasoning.dispatch(&mut app).expect("dispatch reasoning"),
+                HotbarDispatch::AppAction(AppAction::UpdateCompaction(_))
+            ));
+            assert_eq!(app.reasoning_effort, expected_effort);
+            let expected_message = format!("Reasoning effort: {expected_label}");
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some(expected_message.as_str())
+            );
+        }
     }
 
     #[test]

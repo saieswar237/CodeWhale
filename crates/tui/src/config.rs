@@ -82,7 +82,7 @@ pub const OPENROUTER_QWEN_3_6_27B_MODEL: &str = "qwen/qwen3.6-27b";
 pub const OPENROUTER_QWEN_3_6_PLUS_MODEL: &str = "qwen/qwen3.6-plus";
 pub const OPENROUTER_QWEN_3_7_MAX_MODEL: &str = "qwen/qwen3.7-max";
 pub const OPENROUTER_MINIMAX_2_7_MODEL: &str = "minimax/minimax-2.7";
-pub const OPENROUTER_NEMOTRON_3_ULTRA_MODEL: &str = "nvidia/nemotron-3-ultra";
+pub const OPENROUTER_NEMOTRON_3_ULTRA_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b";
 pub const OPENROUTER_TENCENT_HY3_PREVIEW_MODEL: &str = "tencent/hy3-preview";
 pub const OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL: &str = "xiaomi/mimo-v2.5-pro";
 pub const OPENROUTER_XIAOMI_MIMO_V2_5_MODEL: &str = "xiaomi/mimo-v2.5";
@@ -392,6 +392,8 @@ pub struct ModelAliasDeprecation {
 pub enum RequestPayloadMode {
     /// Standard OpenAI-compatible `/v1/chat/completions` payload.
     ChatCompletions,
+    /// OpenAI Responses API payload.
+    Responses,
     /// Native Anthropic Messages API `/v1/messages` payload (#3014).
     AnthropicMessages,
 }
@@ -416,6 +418,20 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: true,
             request_payload_mode: RequestPayloadMode::AnthropicMessages,
+            alias_deprecation: None,
+        };
+    }
+
+    if matches!(provider, ApiProvider::OpenaiCodex) {
+        return ProviderCapability {
+            provider,
+            resolved_model: resolved_model.to_string(),
+            context_window: crate::models::context_window_for_model(resolved_model)
+                .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
+            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            thinking_supported: true,
+            cache_telemetry_supported: false,
+            request_payload_mode: RequestPayloadMode::Responses,
             alias_deprecation: None,
         };
     }
@@ -646,6 +662,12 @@ fn canonical_openrouter_recent_model_id(model: &str) -> Option<&'static str> {
         OPENROUTER_NEMOTRON_3_NANO_OMNI_MODEL
         | "nemotron-3-nano-omni"
         | "nemotron-3-nano-omni-reasoning" => Some(OPENROUTER_NEMOTRON_3_NANO_OMNI_MODEL),
+        OPENROUTER_NEMOTRON_3_ULTRA_MODEL
+        | "nvidia/nemotron-3-ultra"
+        | "nemotron-3-ultra"
+        | "nemotron-3-ultra-550b-a55b"
+        | "nvidia-nemotron-3-ultra"
+        | "nvidia-nemotron-3-ultra-550b-a55b" => Some(OPENROUTER_NEMOTRON_3_ULTRA_MODEL),
         OPENROUTER_QWEN_3_6_35B_A3B_MODEL
         | "qwen3.6-35b-a3b"
         | "qwen-3.6-35b-a3b"
@@ -10766,6 +10788,18 @@ model = "deepseek-ai/deepseek-v4-pro"
     }
 
     #[test]
+    fn provider_capability_openai_codex_uses_responses_payload() {
+        let cap = provider_capability(ApiProvider::OpenaiCodex, DEFAULT_OPENAI_CODEX_MODEL);
+        assert_eq!(cap.provider, ApiProvider::OpenaiCodex);
+        assert_eq!(cap.resolved_model, DEFAULT_OPENAI_CODEX_MODEL);
+        assert_eq!(cap.context_window, 1_050_000);
+        assert_eq!(cap.max_output, 128_000);
+        assert!(cap.thinking_supported);
+        assert!(!cap.cache_telemetry_supported);
+        assert_eq!(cap.request_payload_mode, RequestPayloadMode::Responses);
+    }
+
+    #[test]
     fn provider_capability_openrouter_recent_large_models_are_reasoning_aware() {
         for (model, expected_window, expected_output) in [
             (
@@ -10780,6 +10814,7 @@ model = "deepseek-ai/deepseek-v4-pro"
             (OPENROUTER_QWEN_3_6_PLUS_MODEL, 1_000_000, 65_536),
             (OPENROUTER_XIAOMI_MIMO_V2_5_PRO_MODEL, 1_000_000, 131_072),
             (OPENROUTER_MINIMAX_M3_MODEL, 1_000_000, 524_288),
+            (OPENROUTER_NEMOTRON_3_ULTRA_MODEL, 1_000_000, 16_384),
         ] {
             let cap = provider_capability(ApiProvider::Openrouter, model);
 
@@ -10790,6 +10825,26 @@ model = "deepseek-ai/deepseek-v4-pro"
             assert_eq!(
                 cap.request_payload_mode,
                 RequestPayloadMode::ChatCompletions
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_nemotron_ultra_aliases_resolve_to_live_id() {
+        assert_eq!(
+            OPENROUTER_NEMOTRON_3_ULTRA_MODEL,
+            "nvidia/nemotron-3-ultra-550b-a55b"
+        );
+        assert_ne!(OPENROUTER_NEMOTRON_3_ULTRA_MODEL, "nvidia/nemotron-3-ultra");
+
+        for alias in [
+            "nemotron-3-ultra",
+            "nvidia/nemotron-3-ultra",
+            "nvidia-nemotron-3-ultra",
+        ] {
+            assert_eq!(
+                normalize_model_name_for_provider(ApiProvider::Openrouter, alias).as_deref(),
+                Some(OPENROUTER_NEMOTRON_3_ULTRA_MODEL)
             );
         }
     }

@@ -65,10 +65,10 @@ use crate::settings::Settings;
 use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskStatus, TaskSummary,
 };
+use crate::tools::goal::{GoalSnapshot, GoalStatus};
 use crate::tools::shell::{ShellJobSnapshot, ShellStatus};
 use crate::tools::spec::{RuntimeToolServices, ToolResult};
 use crate::tools::subagent::SubAgentStatus;
-use crate::tui::app::HuntVerdict;
 use crate::tui::auto_router;
 use crate::tui::color_compat::ColorCompatBackend;
 use crate::tui::command_palette::{
@@ -119,7 +119,7 @@ use crate::tui::workspace_context;
 use super::key_actions;
 
 use super::app::{
-    App, AppAction, AppMode, OnboardingState, PendingProviderSwitch, QueuedMessage,
+    App, AppAction, AppMode, HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage,
     ReasoningEffort, SidebarFocus, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
     TaskPanelEntryKind, TuiOptions, looks_like_slash_command_input, shell_command_from_bang_input,
 };
@@ -888,10 +888,10 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         capacity: crate::core::capacity::CapacityControllerConfig::from_app_config(config),
         todos: app.todos.clone(),
         plan_state: app.plan_state.clone(),
-        goal_state: crate::tools::goal::new_shared_goal_state_from_host(
+        goal_state: crate::tools::goal::new_shared_goal_state_from_host_status(
             app.hunt.quarry.clone(),
             app.hunt.token_budget,
-            app.hunt.verdict == HuntVerdict::Hunted,
+            app.hunt.verdict.goal_status(),
         ),
         max_spawn_depth: crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH,
         allowed_tools: app.active_allowed_tools.clone(),
@@ -921,6 +921,8 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
         goal_objective: app.hunt.quarry.clone(),
+        goal_token_budget: app.hunt.token_budget,
+        goal_status: app.hunt.verdict.goal_status(),
         locale_tag: app.ui_locale.tag().to_string(),
         workshop: config.workshop.clone(),
         search_provider: config.search_provider(),
@@ -2165,6 +2167,11 @@ async fn run_event_loop(
                     }
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
+                    }
+                    EngineEvent::GoalUpdated { snapshot } => {
+                        if apply_goal_snapshot_to_app(app, &snapshot) {
+                            transcript_batch_updated = true;
+                        }
                     }
                     EngineEvent::SessionUpdated {
                         session_id,
@@ -4521,10 +4528,12 @@ async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, 
     let base_url = client.base_url().to_string();
     let reasoning_effort = if app.reasoning_effort == ReasoningEffort::Auto {
         app.last_effective_reasoning_effort
-            .and_then(ReasoningEffort::api_value)
+            .and_then(|effort| effort.api_value_for_provider(app.api_provider))
             .map(str::to_string)
     } else {
-        app.reasoning_effort.api_value().map(str::to_string)
+        app.reasoning_effort
+            .api_value_for_provider(app.api_provider)
+            .map(str::to_string)
     };
     let request = MessageRequest {
         model: app.model.clone(),
@@ -5491,10 +5500,14 @@ async fn dispatch_user_message(
                 ))
             });
         app.last_effective_reasoning_effort = Some(effort);
-        Some(effort.as_setting().to_string())
+        effort
+            .api_value_for_provider(app.api_provider)
+            .map(str::to_string)
     } else {
         app.last_effective_reasoning_effort = None;
-        app.reasoning_effort.api_value().map(str::to_string)
+        app.reasoning_effort
+            .api_value_for_provider(app.api_provider)
+            .map(str::to_string)
     };
 
     if let Some(selection) = auto_selection.as_ref() {
@@ -5505,7 +5518,10 @@ async fn dispatch_user_message(
                 selection.source.label()
             );
             if let Some(effort) = app.last_effective_reasoning_effort {
-                status.push_str(&format!("; thinking auto: {}", effort.as_setting()));
+                status.push_str(&format!(
+                    "; thinking auto: {}",
+                    effort.display_label_for_provider(app.api_provider)
+                ));
             }
             app.status_message = Some(status);
         }
@@ -5519,6 +5535,8 @@ async fn dispatch_user_message(
             mode: app.mode,
             model: effective_model,
             goal_objective: app.hunt.quarry.clone(),
+            goal_token_budget: app.hunt.token_budget,
+            goal_status: app.hunt.verdict.goal_status(),
             reasoning_effort: effective_reasoning_effort,
             reasoning_effort_auto: auto_controls_reasoning,
             auto_model: app.auto_model,
@@ -5540,6 +5558,47 @@ async fn dispatch_user_message(
     }
 
     Ok(())
+}
+
+fn goal_status_from_snapshot(snapshot: &GoalSnapshot) -> Option<GoalStatus> {
+    match snapshot.status.trim() {
+        "active" => Some(GoalStatus::Active),
+        "paused" => Some(GoalStatus::Paused),
+        "complete" => Some(GoalStatus::Complete),
+        "blocked" => Some(GoalStatus::Blocked),
+        _ => None,
+    }
+}
+
+pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot) -> bool {
+    let Some(objective) = snapshot
+        .objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|objective| !objective.is_empty())
+    else {
+        return false;
+    };
+    let Some(status) = goal_status_from_snapshot(snapshot) else {
+        tracing::warn!("ignoring unknown runtime goal status: {}", snapshot.status);
+        return false;
+    };
+    let verdict = HuntVerdict::from_goal_status(status);
+    let objective_changed = app.hunt.quarry.as_deref() != Some(objective);
+    let changed = objective_changed
+        || app.hunt.token_budget != snapshot.token_budget
+        || app.hunt.verdict != verdict;
+    if !changed {
+        return false;
+    }
+
+    app.hunt.quarry = Some(objective.to_string());
+    app.hunt.token_budget = snapshot.token_budget;
+    app.hunt.verdict = verdict;
+    if objective_changed || app.hunt.started_at.is_none() {
+        app.hunt.started_at = Some(Instant::now());
+    }
+    true
 }
 
 async fn sync_mode_update(engine_handle: &EngineHandle, mode: AppMode) {
@@ -5697,6 +5756,8 @@ async fn apply_model_picker_choice(
     let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
     if model_is_auto {
         effort = ReasoningEffort::Auto;
+    } else {
+        effort = effort.normalize_for_provider(target_provider.unwrap_or(app.api_provider));
     }
     if let Some(target_provider) = target_provider
         && target_provider != app.api_provider
@@ -5756,7 +5817,10 @@ async fn apply_model_picker_choice(
             settings.set_model_for_provider(app.api_provider.as_str(), &model);
         }
         if effort_changed {
-            settings.set("reasoning_effort", effort.as_setting())?;
+            settings.set(
+                "reasoning_effort",
+                effort.as_setting_for_provider(app.api_provider),
+            )?;
         }
         settings.save()
     })();
@@ -5804,9 +5868,10 @@ async fn apply_model_picker_choice(
 async fn apply_picker_effort_choice(
     app: &mut App,
     engine_handle: &EngineHandle,
-    effort: ReasoningEffort,
+    mut effort: ReasoningEffort,
     previous_effort: ReasoningEffort,
 ) {
+    effort = effort.normalize_for_provider(app.api_provider);
     if effort == previous_effort {
         return;
     }
@@ -5817,7 +5882,10 @@ async fn apply_picker_effort_choice(
 
     let persist_warning = (|| -> anyhow::Result<()> {
         let mut settings = crate::settings::Settings::load()?;
-        settings.set("reasoning_effort", effort.as_setting())?;
+        settings.set(
+            "reasoning_effort",
+            effort.as_setting_for_provider(app.api_provider),
+        )?;
         settings.save()
     })()
     .err()
@@ -5905,6 +5973,7 @@ async fn switch_provider(
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.api_provider = target;
     app.model_ids_passthrough = config.model_ids_pass_through();
+    app.reasoning_effort = app.reasoning_effort.normalize_for_provider(target);
     app.set_model_selection(new_model.clone());
     if model_override.is_some() {
         app.provider_models

@@ -819,7 +819,7 @@ fn apply_model_template(prompt: &str, model_id: &str) -> String {
             "You have a {}-token context window. Do not summarize or delete \
              earlier turns just because the transcript has crossed an older \
              threshold.",
-            if window >= 1_000_000 {
+            if window == 1_000_000 {
                 "one-million".to_string()
             } else {
                 format!("{}", window)
@@ -1225,7 +1225,7 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         && !goal_objective.trim().is_empty()
     {
         full_prompt = format!(
-            "{full_prompt}\n\n## Current Hunt\n\n<session_goal>\n{}\n</session_goal>",
+            "{full_prompt}\n\n## Current Goal\n\n<session_goal>\n{}\n</session_goal>",
             goal_objective.trim()
         );
     }
@@ -1506,6 +1506,19 @@ mod tests {
             prompt.contains("Models may emit *thinking tokens*"),
             "kimi-k2.6 supports reasoning so the thinking note must appear"
         );
+        assert_no_unresolved_model_placeholders(&prompt);
+    }
+
+    #[test]
+    fn compose_prompt_for_openai_codex_uses_verified_context_window() {
+        let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "gpt-5.5");
+        assert!(!prompt.contains("Your V4 Characteristics"));
+        assert!(prompt.contains("1050000-token context window"));
+        assert!(
+            prompt.contains("Models may emit *thinking tokens*"),
+            "gpt-5.5 supports reasoning so the thinking note must appear"
+        );
+        assert!(!prompt.contains("provider-dependent and not known"));
         assert_no_unresolved_model_placeholders(&prompt);
     }
 
@@ -2576,7 +2589,7 @@ mod tests {
         };
 
         assert!(!prompt.contains("<session_goal>"));
-        assert!(!prompt.contains("## Current Hunt"));
+        assert!(!prompt.contains("## Current Goal"));
     }
 
     #[test]

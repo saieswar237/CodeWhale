@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor-style activity metadata rows (#3146).** Dense successful tool-run
+  summaries now render as a single muted `Explored ...` / `Updated metadata`
+  row while keeping keyboard/mouse expansion and detail inspection intact.
+- **Provider-wait observability (#3095).** Footer stall reasons now name the
+  active provider/model route, idle seconds vs stream budget, and whether a
+  fanout plan is still at `0 running` or dispatch is pending. Structured
+  provider-wait incidents log once per turn from the main tick loop (not on
+  every footer redraw).
+- **Interactive fanout launch gate (#3095).** Direct sub-agent children queue
+  behind a configurable semaphore (`[subagents] interactive_max_launch`,
+  default 4) with a visible `queued: waiting for an interactive fanout slot`
+  reason before their first model step.
+- **Goal lifecycle controls.** `/goal` is now the primary command surface for
+  session goals, with `pause`, `resume`, `complete`, `blocked`, and `clear`
+  controls while `/hunt` remains a compatibility alias.
+- **Command-boundary ownership layers (#2888/#3055).** Built-in slash command
+  metadata now lives in `commands/registry.rs`, slash parsing in
+  `commands/parse.rs`, and handlers under group-owned command areas, preserving
+  the existing dispatch surface while reducing future `commands/mod.rs` churn.
+
+### Fixed
+
+- **TUI mouse-report leak (#3063/#3067).** Strip raw SGR mouse coordinate
+  tails from the composer even when `use_mouse_capture` is false, covering
+  orphaned terminal reporting state after crashes or focus races.
+- **Interrupted sub-agent lifecycle (#3080).** API-timeout interruptions now
+  emit `MailboxMessage::Interrupted`, render terminal interrupted cards, and
+  reconcile stale running fanout counts from manager snapshots.
+- **OpenAI Codex reasoning tiers.** Switching from DeepSeek to `openai-codex`
+  now normalizes stale reasoning state into Responses-compatible
+  `low`/`medium`/`high`/`xhigh` tiers and reports Codex as a Responses payload
+  provider.
+- **OpenAI Codex context metadata (#3070).** The `gpt-5.5` default and
+  CodeWhale aliases now use OpenAI's documented 1,050,000-token context window
+  and 128,000 max-output metadata for context pressure, prompts, and doctor
+  capability output.
+- **OpenRouter Nemotron 3 Ultra preset.** The OpenRouter preset and model
+  registry now emit `nvidia/nemotron-3-ultra-550b-a55b` while keeping the old
+  Ultra aliases compatible.
+- **OpenRouter auth after MiMo switches (#3064).** Switching from Xiaomi MiMo
+  to OpenRouter now has regression coverage for preflight key failures and
+  Bearer auth header isolation before any request can be dispatched.
+- **Responses strict-tool schema compatibility (#3062/#3017/#1883).** Responses
+  function tools now preserve per-tool strict-mode compatibility, keep optional
+  strict-schema fields nullable, and append deterministic constraint notes when
+  root composition groups must be flattened for Responses.
+- **Runtime prompt autonomous loop guard (#3061).** Runtime policy reference
+  now explicitly forbids initiating new work when `<runtime_prompt>` is the
+  only new turn content and no tool/sub-agent handoff is pending.
+- **Goal runtime status sync.** Goal token budgets and active/paused/complete
+  status now sync into the engine alongside the objective, and model-visible
+  `update_goal` can only mark goals complete or blocked.
+
+### Contributors
+
+- Devin session work on #3080/#3095 (PRs #3103, #3104, #3106) — Hunter Bown
+  (maintainer integration/cherry-pick on `codex/v0.8.59-release-ready`).
+- Nightt (@nightt5879) for the Responses strict-tool schema hardening in PR
+  #3062.
+- yekern (@yekern) for the #3061 runtime-prompt loop safety report and repro
+  that shaped the dispatch guard.
+- Paulo Aboim Pinto (@aboimpinto) for the staged command-boundary design and
+  Layer 3 registry/parser extraction in PR #2888, plus the #2851/#2791/#2870
+  architecture stream that guided the grouped command areas in #3055.
+
 ## [0.8.58] - 2026-06-11
 
 ### Added

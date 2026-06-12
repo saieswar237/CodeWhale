@@ -14,7 +14,7 @@ Bindings are not (yet) user-configurable — tracked for a future release (#436,
 | `Ctrl-B`             | Background the running foreground shell command (turn continues; the command becomes a `/jobs` background job) |
 | `Ctrl-D`             | Quit (only when the composer is empty)                         |
 | `Tab`                | Cycle TUI mode: Plan → Agent → YOLO → Plan                     |
-| `Shift-Tab`          | Cycle reasoning effort: off → high → max → off                 |
+| `Shift-Tab`          | Cycle reasoning effort for the active provider. DeepSeek-style providers cycle off → high → max → off; OpenAI Codex cycles low → medium → high → xhigh → low. |
 | `Ctrl-R`             | Open the resume-session picker                                 |
 | `Ctrl-L`             | Refresh / clear the screen                                     |
 | `Ctrl-O`             | Open Activity Detail for selected/live/recent tool work, or the full reasoning timeline for thinking blocks when the composer is empty |

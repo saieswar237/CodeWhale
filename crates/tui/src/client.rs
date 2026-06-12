@@ -757,12 +757,19 @@ fn build_default_headers(
         if header_name == AUTHORIZATION
             || header_name == CONTENT_TYPE
             || auth_header_name.as_ref() == Some(&header_name)
+            || (auth_header_name.is_some() && is_auth_dialect_header(&header_name))
         {
             continue;
         }
         headers.insert(header_name, HeaderValue::from_str(value)?);
     }
     Ok(headers)
+}
+
+fn is_auth_dialect_header(header_name: &HeaderName) -> bool {
+    header_name == AUTHORIZATION
+        || header_name == HeaderName::from_static("api-key")
+        || header_name == HeaderName::from_static("x-api-key")
 }
 
 fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
@@ -1873,6 +1880,49 @@ mod tests {
             headers.get(AUTHORIZATION).is_none(),
             "tp-* Token Plan keys should use api-key auth even through custom gateways"
         );
+    }
+
+    #[test]
+    fn openrouter_uses_bearer_header_after_mimo_token_plan_context() {
+        let mut extra = HashMap::new();
+        extra.insert("api-key".to_string(), "wrong".to_string());
+        let headers = DeepSeekClient::default_headers_for_provider(
+            "sk-or-test",
+            &extra,
+            ApiProvider::Openrouter,
+            crate::config::DEFAULT_OPENROUTER_BASE_URL,
+        )
+        .expect("headers");
+
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-or-test")
+        );
+        assert!(
+            headers.get("api-key").is_none(),
+            "OpenRouter must not inherit Xiaomi MiMo's api-key header dialect"
+        );
+    }
+
+    #[test]
+    fn custom_api_key_header_is_allowed_without_primary_provider_key() {
+        let mut extra = HashMap::new();
+        extra.insert("api-key".to_string(), "gateway-key".to_string());
+        let headers = DeepSeekClient::default_headers_for_provider(
+            "",
+            &extra,
+            ApiProvider::Openai,
+            "https://gateway.example.test/v1",
+        )
+        .expect("headers");
+
+        assert_eq!(
+            headers.get("api-key").and_then(|value| value.to_str().ok()),
+            Some("gateway-key")
+        );
+        assert!(headers.get(AUTHORIZATION).is_none());
     }
 
     #[test]

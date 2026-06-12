@@ -643,11 +643,14 @@ impl Default for ModelRegistry {
             },
             // NVIDIA Nemotron 3 Ultra (OpenRouter)
             ModelInfo {
-                id: "nvidia/nemotron-3-ultra".to_string(),
+                id: "nvidia/nemotron-3-ultra-550b-a55b".to_string(),
                 provider: ProviderKind::Openrouter,
                 aliases: vec![
+                    "nvidia/nemotron-3-ultra".to_string(),
                     "nemotron-3-ultra".to_string(),
+                    "nemotron-3-ultra-550b-a55b".to_string(),
                     "nvidia-nemotron-3-ultra".to_string(),
+                    "nvidia-nemotron-3-ultra-550b-a55b".to_string(),
                 ],
                 supports_tools: true,
                 supports_reasoning: true,
@@ -1220,6 +1223,11 @@ mod tests {
             ("minimax-m3", "minimax/minimax-m3"),
             ("openrouter-mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro"),
             ("openrouter-kimi-k2.6", "moonshotai/kimi-k2.6"),
+            ("nemotron-3-ultra", "nvidia/nemotron-3-ultra-550b-a55b"),
+            (
+                "nvidia/nemotron-3-ultra",
+                "nvidia/nemotron-3-ultra-550b-a55b",
+            ),
         ] {
             let resolved = registry.resolve(Some(alias), Some(ProviderKind::Openrouter));
 

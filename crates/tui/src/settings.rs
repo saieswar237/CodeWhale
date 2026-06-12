@@ -1114,7 +1114,7 @@ fn normalize_reasoning_effort_setting(value: &str) -> Result<Option<String>> {
         "max" | "maximum" | "xhigh" => "max",
         _ => {
             anyhow::bail!(
-                "Failed to update setting: invalid reasoning_effort '{value}'. Expected: auto, off, low, medium, high, max, or default."
+                "Failed to update setting: invalid reasoning_effort '{value}'. Expected: auto, off, low, medium, high, max, xhigh, or default."
             );
         }
     };

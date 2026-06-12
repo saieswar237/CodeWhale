@@ -56,11 +56,10 @@ impl DeepSeekClient {
             }
         }
 
-        // Reasoning configuration. The Codex Responses backend only accepts a
-        // fixed set of effort levels (none/minimal/low/medium/high/xhigh), so
-        // map CodeWhale's effort string onto those and omit reasoning entirely
-        // when it is disabled. CodeWhale's "auto" has no Codex equivalent and
-        // falls back to "medium".
+        // Reasoning configuration. The Codex Responses backend accepts
+        // low/medium/high/xhigh, so provider-aware callers normalize inherited
+        // DeepSeek-only values before request construction: "off" becomes
+        // "low", and CodeWhale's "auto" falls back to "medium".
         if let Some(raw) = request.reasoning_effort.as_deref()
             && let Some(effort) = codex_responses_reasoning_effort(raw)
         {
@@ -597,11 +596,16 @@ fn convert_messages_to_responses_input(request: &MessageRequest) -> Vec<Value> {
 /// Convert a CodeWhale tool definition to a Responses API function tool.
 fn tool_to_responses_function(tool: &Tool) -> Value {
     let mut parameters = tool.input_schema.clone();
-    schema_sanitize::sanitize_for_responses(&mut parameters);
+    let constraint_note = schema_sanitize::sanitize_for_responses(&mut parameters);
+    let description = match constraint_note {
+        Some(note) if tool.description.trim().is_empty() => note,
+        Some(note) => format!("{}\n\n{}", tool.description.trim(), note),
+        None => tool.description.clone(),
+    };
     json!({
         "type": "function",
         "name": tool.name,
-        "description": tool.description,
+        "description": description,
         "parameters": parameters,
         "strict": false,
     })
@@ -609,7 +613,7 @@ fn tool_to_responses_function(tool: &Tool) -> Value {
 
 fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "off" | "disabled" | "none" | "false" => None,
+        "off" | "disabled" | "none" | "false" => Some("low"),
         "minimal" => Some("minimal"),
         "low" => Some("low"),
         "high" => Some("high"),
@@ -667,7 +671,7 @@ mod tests {
         assert_eq!(codex_responses_reasoning_effort("high"), Some("high"));
         assert_eq!(codex_responses_reasoning_effort("medium"), Some("medium"));
         assert_eq!(codex_responses_reasoning_effort("auto"), Some("medium"));
-        assert_eq!(codex_responses_reasoning_effort("off"), None);
+        assert_eq!(codex_responses_reasoning_effort("off"), Some("low"));
     }
 
     #[test]
@@ -750,6 +754,66 @@ mod tests {
         assert!(parameters.get("not").is_none());
         assert!(parameters["properties"].get("patch").is_some());
         assert!(parameters["properties"].get("changes").is_some());
+        assert_eq!(
+            payload["description"],
+            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch`."
+        );
         assert!(tool.input_schema.get("oneOf").is_some());
+    }
+
+    #[test]
+    fn responses_function_tool_trims_description_before_constraint_note() {
+        let tool = Tool {
+            tool_type: None,
+            name: "apply_patch".to_string(),
+            description: "Apply patch\n".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string"},
+                    "changes": {"type": "array"}
+                },
+                "oneOf": [
+                    {"required": ["patch"]},
+                    {"required": ["changes"]}
+                ]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+
+        let payload = tool_to_responses_function(&tool);
+
+        assert_eq!(
+            payload["description"],
+            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch`."
+        );
+    }
+
+    #[test]
+    fn responses_function_tool_leaves_description_unchanged_without_constraint_note() {
+        let tool = Tool {
+            tool_type: None,
+            name: "lookup".to_string(),
+            description: "Lookup".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+
+        let payload = tool_to_responses_function(&tool);
+
+        assert_eq!(payload["description"], "Lookup");
     }
 }

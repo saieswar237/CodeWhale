@@ -75,6 +75,7 @@ impl Engine {
         // the SAME request up to MAX_STREAM_RETRIES times before surfacing
         // the failure to the user.
         let mut stream_retry_attempts: u32 = 0;
+        let mut last_dispatched_messages_revision: Option<u64> = None;
 
         'turn_loop: loop {
             if self.cancel_token.is_cancelled() {
@@ -240,6 +241,17 @@ impl Engine {
             // appends <archived_context> blocks rather than replacing history.
             self.layered_context_checkpoint().await;
 
+            if should_skip_runtime_prompt_only_dispatch(
+                last_dispatched_messages_revision,
+                self.session.messages_revision,
+                stream_retry_attempts,
+            ) {
+                let message = "No new user, tool, sub-agent, or continuation input since the last provider request; ending turn instead of dispatching a runtime-prompt-only request.";
+                crate::logging::warn(message.to_string());
+                let _ = self.tx_event.send(Event::status(message)).await;
+                break;
+            }
+
             // Build the request
             let force_update_plan_this_step = force_update_plan_first && turn.tool_calls.is_empty();
             let mut active_tools = if tool_catalog.is_empty() {
@@ -388,6 +400,7 @@ impl Engine {
             // first call) so we can resend it on a transparent retry below
             // when the wire dies before any content was streamed (#103).
             let stream_request = request;
+            last_dispatched_messages_revision = Some(self.session.messages_revision);
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -410,6 +423,7 @@ impl Engine {
                             .await
                     {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
+                        last_dispatched_messages_revision = None;
                         continue;
                     }
                     turn_error = Some(message.clone());
@@ -1406,7 +1420,7 @@ impl Engine {
                     )
                 {
                     blocked_error = Some(ToolError::permission_denied(format!(
-                        "'{tool_name}' is not available in Plan mode — switch to Agent, Goal, or YOLO mode to run commands and code."
+                        "'{tool_name}' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code."
                     )));
                 }
 
@@ -2401,6 +2415,15 @@ fn should_hold_turn_for_subagents(queued_completions: usize, running_children: u
     queued_completions > 0 || running_children > 0
 }
 
+fn should_skip_runtime_prompt_only_dispatch(
+    last_dispatched_messages_revision: Option<u64>,
+    current_messages_revision: u64,
+    stream_retry_attempts: u32,
+) -> bool {
+    last_dispatched_messages_revision == Some(current_messages_revision)
+        && stream_retry_attempts == 0
+}
+
 fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
     let secs = config.stream_chunk_timeout.as_secs();
     (secs, Duration::from_secs(secs))
@@ -2647,6 +2670,14 @@ mod tests {
         assert!(should_hold_turn_for_subagents(1, 0));
         assert!(should_hold_turn_for_subagents(0, 1));
         assert!(!should_hold_turn_for_subagents(0, 0));
+    }
+
+    #[test]
+    fn runtime_prompt_only_dispatch_guard_requires_new_transcript_input() {
+        assert!(!should_skip_runtime_prompt_only_dispatch(None, 7, 0));
+        assert!(!should_skip_runtime_prompt_only_dispatch(Some(6), 7, 0));
+        assert!(!should_skip_runtime_prompt_only_dispatch(Some(7), 7, 1));
+        assert!(should_skip_runtime_prompt_only_dispatch(Some(7), 7, 0));
     }
 
     #[test]

@@ -3504,3 +3504,120 @@ async fn interactive_launch_gate_queues_extra_direct_children() {
         "queued child must not start until a permit frees: {messages:?}"
     );
 }
+
+#[tokio::test]
+async fn queued_interactive_child_heartbeat_prevents_stale_cleanup() {
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
+
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(
+        SubAgentManager::new(tmp.path().to_path_buf(), 4)
+            .with_running_heartbeat_timeout(Duration::from_millis(25)),
+    ));
+
+    let (client, _calls, _bodies) = delayed_chat_client(Duration::from_millis(10), "done").await;
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut runtime = stub_runtime();
+    runtime.client = client;
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    runtime.mailbox = Some(mailbox);
+
+    let gate = Arc::new(Semaphore::new(0));
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        "agent_gate_heartbeat".to_string(),
+        SubAgentType::General,
+        "Answer".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        Some(vec![]),
+        input_tx,
+        tmp.path().to_path_buf(),
+        "boot_test".to_string(),
+    );
+    let task = SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime: runtime.clone(),
+        agent_id: agent.id.clone(),
+        agent_type: SubAgentType::General,
+        prompt: "Answer".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: Some(vec![]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 1,
+        input_rx,
+        launch_gate: Some(Arc::clone(&gate)),
+    };
+
+    let agent_id = agent.id.clone();
+    {
+        let mut mgr = manager.write().await;
+        mgr.agents.insert(agent.id.clone(), agent);
+    }
+
+    let handle = tokio::spawn(run_subagent_task(task));
+
+    let mut queued_progress = 0;
+    let collected = tokio::time::timeout(Duration::from_secs(2), async {
+        while queued_progress < 4 {
+            let Some(envelope) = mailbox_rx.recv().await else {
+                break;
+            };
+            if matches!(
+                envelope.message,
+                MailboxMessage::Progress { ref agent_id, ref status }
+                    if agent_id == "agent_gate_heartbeat"
+                        && status == SUBAGENT_QUEUED_LAUNCH_REASON
+            ) {
+                queued_progress += 1;
+            }
+        }
+    })
+    .await;
+    assert!(
+        collected.is_ok(),
+        "queued child should keep publishing queued heartbeats"
+    );
+    assert_eq!(queued_progress, 4);
+
+    {
+        let mut mgr = manager.write().await;
+        assert_eq!(
+            mgr.cleanup(Duration::from_secs(60 * 60)),
+            0,
+            "queued child with fresh heartbeat must not be auto-cancelled"
+        );
+        assert_eq!(
+            mgr.get_result(&agent_id).expect("agent").status,
+            SubAgentStatus::Running
+        );
+    }
+
+    gate.add_permits(1);
+
+    let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let Some(envelope) = mailbox_rx.recv().await else {
+                return false;
+            };
+            if matches!(
+                envelope.message,
+                MailboxMessage::Completed { ref agent_id, .. }
+                    if agent_id == "agent_gate_heartbeat"
+            ) {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        completed,
+        Ok(true),
+        "queued child should complete after release"
+    );
+    handle.await.expect("subagent task should join");
+}

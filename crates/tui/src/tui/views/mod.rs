@@ -1136,7 +1136,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "max_history" => "integer (0 allowed)",
         "auto_compact_threshold_percent" => "10..=100",
         "default_model" => "deepseek-v4-pro | deepseek-v4-flash | deepseek-* | none/default",
-        "reasoning_effort" => "auto | off | low | medium | high | max | default",
+        "reasoning_effort" => "auto | off | low | medium | high | max | xhigh | default",
         "mcp_config_path" => "path to mcp.json",
         _ => "",
     }

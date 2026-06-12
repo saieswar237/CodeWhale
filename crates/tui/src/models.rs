@@ -257,6 +257,13 @@ pub fn context_window_for_model(model: &str) -> Option<u32> {
 
 fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
     match model_lower {
+        // OpenAI API model docs, verified 2026-06-12:
+        // https://developers.openai.com/api/docs/models/gpt-5.5
+        "gpt-5.5" | "gpt-5.5-pro" | "codex-gpt-5.5" | "chatgpt-gpt-5.5" => Some(1_050_000),
+        // OpenAI Codex model docs, verified 2026-06-12:
+        // https://developers.openai.com/api/docs/models/gpt-5-codex
+        // https://developers.openai.com/api/docs/models/gpt-5.3-codex
+        "gpt-5-codex" | "gpt-5.3-codex" => Some(400_000),
         // Anthropic 4.6+ models carry a 1M window; Haiku stays at 200K (#3014).
         "claude-opus-4-8" | "claude-sonnet-4-6" => Some(1_000_000),
         "claude-haiku-4-5" => Some(200_000),
@@ -281,6 +288,9 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         "minimax/minimax-m3" | "minimax-m3" | "qwen/qwen3.6-flash" | "qwen/qwen3.6-plus" => {
             Some(1_000_000)
         }
+        "nvidia/nemotron-3-ultra-550b-a55b" | "nvidia/nemotron-3-ultra-550b-a55b:free" => {
+            Some(1_000_000)
+        }
         "xiaomi/mimo-v2.5-pro" | "xiaomi/mimo-v2.5" | "mimo-v2.5-pro" | "mimo-v2.5" => {
             Some(1_000_000)
         }
@@ -300,6 +310,8 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         return Some(384_000);
     }
     match lower.as_str() {
+        "gpt-5.5" | "gpt-5.5-pro" | "codex-gpt-5.5" | "chatgpt-gpt-5.5" | "gpt-5-codex"
+        | "gpt-5.3-codex" => Some(128_000),
         "claude-opus-4-8" => Some(128_000),
         "claude-sonnet-4-6" | "claude-haiku-4-5" => Some(64_000),
         "arcee-ai/trinity-large-thinking"
@@ -319,6 +331,8 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         | "mimo-v2.5-tts-voiceclone"
         | "mimo-v2-tts" => Some(8_192),
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" => Some(65_536),
+        "nvidia/nemotron-3-ultra-550b-a55b" => Some(16_384),
+        "nvidia/nemotron-3-ultra-550b-a55b:free" => Some(65_536),
         "google/gemma-4-31b-it" => Some(16_384),
         "google/gemma-4-31b-it:free" | "google/gemma-4-26b-a4b-it:free" => Some(32_768),
         _ => None,
@@ -341,6 +355,12 @@ pub fn model_supports_reasoning(model: &str) -> bool {
         lower.as_str(),
         "claude-opus-4-8"
             | "claude-sonnet-4-6"
+            | "gpt-5.5"
+            | "gpt-5.5-pro"
+            | "codex-gpt-5.5"
+            | "chatgpt-gpt-5.5"
+            | "gpt-5-codex"
+            | "gpt-5.3-codex"
             | "arcee-ai/trinity-large-thinking"
             | "trinity-large-thinking"
             | "google/gemma-4-31b-it"
@@ -353,6 +373,8 @@ pub fn model_supports_reasoning(model: &str) -> bool {
             | "minimax/minimax-m3"
             | "minimax-m3"
             | "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+            | "nvidia/nemotron-3-ultra-550b-a55b"
+            | "nvidia/nemotron-3-ultra-550b-a55b:free"
             | "qwen/qwen3.6-flash"
             | "qwen/qwen3.6-35b-a3b"
             | "qwen/qwen3.6-max-preview"
@@ -575,6 +597,25 @@ mod tests {
             ("z-ai/glm-5.1", 202_752),
         ] {
             assert_eq!(context_window_for_model(model), Some(expected_window));
+            assert!(model_supports_reasoning(model));
+        }
+    }
+
+    #[test]
+    fn openai_codex_models_have_verified_context_metadata() {
+        for model in ["gpt-5.5", "codex-gpt-5.5", "chatgpt-gpt-5.5"] {
+            assert_eq!(context_window_for_model(model), Some(1_050_000));
+            assert_eq!(max_output_tokens_for_model(model), Some(128_000));
+            assert!(model_supports_reasoning(model));
+            assert_eq!(
+                compaction_threshold_for_model_at_percent(model, 80.0),
+                840_000
+            );
+        }
+
+        for model in ["gpt-5-codex", "gpt-5.3-codex"] {
+            assert_eq!(context_window_for_model(model), Some(400_000));
+            assert_eq!(max_output_tokens_for_model(model), Some(128_000));
             assert!(model_supports_reasoning(model));
         }
     }

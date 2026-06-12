@@ -2343,6 +2343,65 @@ async fn provider_switch_to_deepseek_drops_stale_xiaomi_root_base_url() {
 }
 
 #[tokio::test]
+async fn provider_switch_from_mimo_to_openrouter_without_key_fails_before_dispatch() {
+    let _home = SettingsHomeGuard::new();
+    let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::XiaomiMimo;
+    app.model = "mimo-v2.5-pro".to_string();
+    app.model_ids_passthrough = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        api_key: Some("deepseek-key".to_string()),
+        base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1".to_string()),
+        default_text_model: Some("mimo-v2.5-pro".to_string()),
+        providers: Some(ProvidersConfig {
+            xiaomi_mimo: ProviderConfig {
+                api_key: Some("mimo-key".to_string()),
+                model: Some("mimo-v2.5-pro".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::Openrouter,
+        Some(crate::config::OPENROUTER_NEMOTRON_3_ULTRA_MODEL.to_string()),
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::XiaomiMimo);
+    assert_eq!(app.model, "mimo-v2.5-pro");
+    assert!(app.model_ids_passthrough);
+    assert_eq!(config.provider.as_deref(), Some("xiaomi-mimo"));
+    assert_eq!(
+        config
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.openrouter.api_key.as_deref()),
+        None
+    );
+    assert!(app.pending_provider_switch.is_none());
+    let last_system_message = app
+        .history
+        .iter()
+        .rev()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("failed provider switch should add a system message");
+    assert!(last_system_message.contains("OpenRouter API key not found"));
+    assert!(last_system_message.contains("Provider unchanged (xiaomi-mimo)"));
+}
+
+#[tokio::test]
 async fn provider_switch_persists_provider_to_config_for_restart() {
     let _home = SettingsHomeGuard::new();
     let tmp = TempDir::new().expect("config tempdir");
@@ -2440,6 +2499,43 @@ async fn provider_switch_model_override_updates_target_provider_model_slot() {
             .and_then(|providers| providers.xiaomi_mimo.model.as_deref()),
         Some("mimo-v2.5-pro")
     );
+}
+
+#[tokio::test]
+async fn provider_switch_to_openai_codex_normalizes_deepseek_off_effort() {
+    let _home = SettingsHomeGuard::new();
+    let _token = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = DEFAULT_TEXT_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::Off;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        provider: Some("deepseek".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        providers: Some(ProvidersConfig {
+            openai_codex: ProviderConfig {
+                model: Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    switch_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        ApiProvider::OpenaiCodex,
+        None,
+    )
+    .await;
+
+    assert_eq!(app.api_provider, ApiProvider::OpenaiCodex);
+    assert_eq!(app.model, crate::config::DEFAULT_OPENAI_CODEX_MODEL);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_display_label(), "low");
 }
 
 #[tokio::test]
@@ -2828,6 +2924,46 @@ async fn dispatch_resume_message_restores_paused_command_goal() {
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }
+}
+
+#[test]
+fn apply_goal_snapshot_updates_visible_goal_status() {
+    let mut app = create_test_app();
+    app.hunt.quarry = Some("Ship the release lane".to_string());
+    app.hunt.token_budget = Some(10_000);
+    app.hunt.verdict = crate::tui::app::HuntVerdict::Hunting;
+    let started_at = Instant::now();
+    app.hunt.started_at = Some(started_at);
+
+    let completed = crate::tools::goal::GoalSnapshot {
+        objective: Some("Ship the release lane".to_string()),
+        status: "complete".to_string(),
+        token_budget: Some(10_000),
+        elapsed_seconds: Some(12),
+        evidence: Some("focused tests passed".to_string()),
+        blocker: None,
+    };
+
+    assert!(apply_goal_snapshot_to_app(&mut app, &completed));
+    assert_eq!(app.hunt.quarry.as_deref(), Some("Ship the release lane"));
+    assert_eq!(app.hunt.token_budget, Some(10_000));
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
+    assert_eq!(app.hunt.started_at, Some(started_at));
+
+    let blocked = crate::tools::goal::GoalSnapshot {
+        objective: Some("Different objective".to_string()),
+        status: "blocked".to_string(),
+        token_budget: None,
+        elapsed_seconds: Some(1),
+        evidence: None,
+        blocker: Some("needs user approval".to_string()),
+    };
+
+    assert!(apply_goal_snapshot_to_app(&mut app, &blocked));
+    assert_eq!(app.hunt.quarry.as_deref(), Some("Different objective"));
+    assert_eq!(app.hunt.token_budget, None);
+    assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Escaped);
+    assert!(app.hunt.started_at.is_some());
 }
 
 #[test]

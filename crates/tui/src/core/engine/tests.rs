@@ -335,6 +335,35 @@ fn engine_initial_prompt_includes_configured_goal() {
 }
 
 #[test]
+fn engine_initial_prompt_omits_paused_goal() {
+    let config = EngineConfig {
+        goal_objective: Some("Wait for confirmation".to_string()),
+        goal_status: GoalStatus::Paused,
+        ..Default::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let prompt = match engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text,
+        Some(SystemPrompt::Blocks(blocks)) => blocks
+            .into_iter()
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => panic!("expected system prompt"),
+    };
+
+    assert!(!prompt.contains("<session_goal>"));
+    assert!(
+        !engine
+            .config
+            .goal_state
+            .lock()
+            .expect("goal lock")
+            .is_active()
+    );
+}
+
+#[test]
 fn refresh_system_prompt_uses_runtime_goal_state() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     {
@@ -355,6 +384,33 @@ fn refresh_system_prompt_uses_runtime_goal_state() {
 
     assert!(prompt.contains("<session_goal>"));
     assert!(prompt.contains("Close the runtime goal loop"));
+}
+
+#[tokio::test]
+async fn runtime_goal_updates_emit_ui_snapshot() {
+    let (engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    {
+        let mut goal = engine.config.goal_state.lock().expect("goal lock");
+        goal.create("Ship the release lane".to_string(), Some(42_000));
+        goal.mark_complete("verified with focused tests".to_string())
+            .expect("mark complete");
+    }
+
+    engine.emit_goal_updated().await;
+
+    let mut rx = handle.rx_event.write().await;
+    match rx.recv().await.expect("goal update event") {
+        Event::GoalUpdated { snapshot } => {
+            assert_eq!(snapshot.objective.as_deref(), Some("Ship the release lane"));
+            assert_eq!(snapshot.status, "complete");
+            assert_eq!(snapshot.token_budget, Some(42_000));
+            assert_eq!(
+                snapshot.evidence.as_deref(),
+                Some("verified with focused tests")
+            );
+        }
+        other => panic!("expected GoalUpdated, got {other:?}"),
+    }
 }
 
 #[test]
@@ -529,12 +585,12 @@ fn tool_error_messages_include_actionable_hints() {
     // #3020: Plan-mode denials already explain the fix — pass through
     // verbatim, with no conflicting "Adjust approval mode" suffix.
     let plan_denied = ToolError::permission_denied(
-        "'exec_shell' is not available in Plan mode — switch to Agent, Goal, or YOLO mode to run commands and code.",
+        "'exec_shell' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code.",
     );
     let formatted = format_tool_error(&plan_denied, "exec_shell");
     assert_eq!(
         formatted,
-        "'exec_shell' is not available in Plan mode — switch to Agent, Goal, or YOLO mode to run commands and code."
+        "'exec_shell' is not available in Plan mode — switch to Agent or YOLO mode to run commands and code."
     );
 
     // Bare denials still get the actionable suffix.

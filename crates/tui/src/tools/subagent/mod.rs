@@ -106,6 +106,7 @@ const COMPLETED_AGENT_RETENTION: Duration = Duration::from_secs(60 * 60);
 const SUBAGENT_STATE_SCHEMA_VERSION: u32 = 1;
 const SUBAGENT_STATE_FILE: &str = "subagents.v1.json";
 const SUBAGENT_RESTART_REASON: &str = "Interrupted by process restart";
+const SUBAGENT_QUEUED_LAUNCH_REASON: &str = "queued: waiting for an interactive fanout slot";
 
 const VALID_SUBAGENT_TYPES: &str = "general (aliases: general-purpose, general_purpose, worker, default), \
      explore (aliases: exploration, explorer), plan (aliases: planning, planner, awaiter), \
@@ -3899,18 +3900,8 @@ async fn run_subagent_task(task: SubAgentTask) {
         match Arc::clone(gate).try_acquire_owned() {
             Ok(permit) => _launch_permit = Some(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                record_agent_progress(
-                    &task.runtime,
-                    &task.agent_id,
-                    "queued: waiting for an interactive fanout slot".to_string(),
-                );
-                if let Some(mb) = task.runtime.mailbox.as_ref() {
-                    let _ = mb.send(MailboxMessage::progress(
-                        &task.agent_id,
-                        "queued: waiting for an interactive fanout slot".to_string(),
-                    ));
-                }
-                _launch_permit = Arc::clone(gate).acquire_owned().await.ok();
+                _launch_permit =
+                    acquire_queued_interactive_launch_permit(&task, Arc::clone(gate)).await;
             }
             Err(tokio::sync::TryAcquireError::Closed) => {
                 crate::logging::warn(format!(
@@ -3997,6 +3988,56 @@ async fn run_subagent_task(task: SubAgentTask) {
             result: payload,
         });
     }
+}
+
+async fn acquire_queued_interactive_launch_permit(
+    task: &SubAgentTask,
+    gate: Arc<Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    record_queued_launch_progress(task).await;
+    let heartbeat = queued_launch_heartbeat_interval();
+    loop {
+        tokio::select! {
+            biased;
+            () = task.runtime.cancel_token.cancelled() => {
+                record_agent_progress(
+                    &task.runtime,
+                    &task.agent_id,
+                    "cancelled while queued for an interactive fanout slot".to_string(),
+                );
+                return None;
+            }
+            permit = Arc::clone(&gate).acquire_owned() => {
+                return permit.ok();
+            }
+            () = tokio::time::sleep(heartbeat) => {
+                record_queued_launch_progress(task).await;
+            }
+        }
+    }
+}
+
+async fn record_queued_launch_progress(task: &SubAgentTask) {
+    {
+        let mut manager = task.runtime.manager.write().await;
+        manager.touch(&task.agent_id);
+    }
+    emit_agent_progress(
+        task.runtime.event_tx.as_ref(),
+        task.runtime.mailbox.as_ref(),
+        &task.agent_id,
+        SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
+    );
+}
+
+#[cfg(test)]
+fn queued_launch_heartbeat_interval() -> Duration {
+    Duration::from_millis(10)
+}
+
+#[cfg(not(test))]
+fn queued_launch_heartbeat_interval() -> Duration {
+    Duration::from_secs(10)
 }
 
 /// Notify the engine's parent turn loop that a direct child finished

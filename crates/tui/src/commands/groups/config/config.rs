@@ -247,7 +247,11 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 .default_model
                 .unwrap_or_else(|| "(default)".to_string())
         }),
-        "reasoning_effort" | "effort" => Some(app.reasoning_effort.as_setting().to_string()),
+        "reasoning_effort" | "effort" => Some(
+            app.reasoning_effort
+                .as_setting_for_provider(app.api_provider)
+                .to_string(),
+        ),
         "prefer_external_pdftotext" | "external_pdftotext" | "pdftotext" => Settings::load()
             .ok()
             .map(|settings| settings.prefer_external_pdftotext.to_string()),

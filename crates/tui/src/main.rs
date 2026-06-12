@@ -4222,7 +4222,7 @@ async fn run_review(config: &Config, args: ReviewArgs) -> Result<()> {
     let model = route.model;
     let reasoning_effort = route
         .reasoning_effort
-        .map(|effort| effort.as_setting().to_string());
+        .and_then(|effort| cli_reasoning_effort_value(config, effort));
 
     let system = SystemPrompt::Text(
         "You are a senior code reviewer. Focus on bugs, risks, behavioral regressions, and missing tests. \
@@ -5557,6 +5557,15 @@ struct CliAutoRoute {
     auto_model: bool,
 }
 
+fn cli_reasoning_effort_value(
+    config: &Config,
+    effort: crate::tui::app::ReasoningEffort,
+) -> Option<String> {
+    effort
+        .api_value_for_provider(config.api_provider())
+        .map(str::to_string)
+}
+
 async fn resolve_cli_auto_route(config: &Config, model: &str, prompt: &str) -> CliAutoRoute {
     if model.trim().eq_ignore_ascii_case("auto") {
         let selection =
@@ -5591,7 +5600,7 @@ async fn run_one_shot(config: &Config, model: &str, prompt: &str) -> Result<()> 
     let route = resolve_cli_auto_route(config, model, prompt).await;
     let reasoning_effort = route
         .reasoning_effort
-        .map(|effort| effort.as_setting().to_string());
+        .and_then(|effort| cli_reasoning_effort_value(config, effort));
 
     let request = MessageRequest {
         model: route.model,
@@ -5634,7 +5643,7 @@ async fn run_one_shot_json(config: &Config, model: &str, prompt: &str) -> Result
     let model = route.model;
     let reasoning_effort = route
         .reasoning_effort
-        .map(|effort| effort.as_setting().to_string());
+        .and_then(|effort| cli_reasoning_effort_value(config, effort));
     let request = MessageRequest {
         model: model.clone(),
         messages: vec![Message {
@@ -5810,7 +5819,7 @@ async fn run_exec_agent(
     let effective_model = route.model;
     let effective_reasoning_effort = route
         .reasoning_effort
-        .map(|effort| effort.as_setting().to_string());
+        .and_then(|effort| cli_reasoning_effort_value(config, effort));
 
     let settings = crate::settings::Settings::load().unwrap_or_default();
     let auto_compact_enabled = if crate::settings::Settings::auto_compact_explicitly_configured() {
@@ -5892,6 +5901,8 @@ async fn run_exec_agent(
         vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
         goal_objective: None,
+        goal_token_budget: None,
+        goal_status: crate::tools::goal::GoalStatus::Active,
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         hook_executor: None,
@@ -5951,6 +5962,8 @@ async fn run_exec_agent(
             mode,
             model: effective_model.clone(),
             goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
             allowed_tools: allowed_tools.clone(),
             hook_executor: None,
             reasoning_effort: effective_reasoning_effort,
