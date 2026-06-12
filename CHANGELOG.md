@@ -76,6 +76,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hotbar slots only when the composer is empty, while `Alt+1`-`Alt+8` trigger
   slots regardless of composer text and overlays keep key ownership. Thanks
   @reidliu41 for the PR.
+- **Voice dictation commands (#3051).** `/voice`, `/voice-send`, and
+  `/voice-control` now record through `sox`/`rec`/`arecord`, transcribe via the
+  active provider's chat-completions API, and insert transcripts at the
+  composer cursor. The `voice.toggle` hotbar action dispatches the real voice
+  command, with help and status text localized across all seven shipped
+  locales. Thanks @huqiantao for the PR.
+- **Thread rewind and snapshot restore API (#2808).** GUI clients can now call
+  `POST /v1/threads/{id}/undo`, `/patch-undo`, and `/retry` to fork, roll back,
+  or rerun recent thread turns, plus `POST /v1/snapshots/{id}/restore` to
+  restore a workspace snapshot by id. Thanks @bengao168 for the PR.
+- **Active provider fallback chain (#2773).** Configured `fallback_providers`
+  now build an ordered primary-plus-fallback route that the TUI can report,
+  advance through, and reset with `/provider fallback reset`, including footer
+  visibility for fallback state. Thanks @idling11 for the PR.
+- **Provider metadata registry (#3005).** Built-in provider ids, display names,
+  defaults, env vars, config keys, aliases, and wire formats now live in a
+  shared metadata registry, with the provider drift check covering the registry
+  contract. Thanks @sximelon for the PR.
+- **Hugging Face provider route (#2879).** Hugging Face Inference Providers now
+  have first-class config, env, docs, and registry coverage for the
+  OpenAI-compatible router, including `huggingface`/`hugging-face`/
+  `hugging_face`/`hf` aliases and `HUGGINGFACE_*`/`HF_*` env fallbacks. Thanks
+  @mvanhorn for the PR.
 
 ### Fixed
 
