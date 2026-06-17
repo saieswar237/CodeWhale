@@ -302,7 +302,7 @@ async fn exec_shell_wait_without_wait_arg_returns_snapshot() {
 }
 
 #[tokio::test]
-async fn background_start_advertises_auto_notify() {
+async fn background_start_advertises_task_status_completion() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
     let result = ExecShellTool
@@ -313,13 +313,17 @@ async fn background_start_advertises_auto_notify() {
         .await
         .expect("start background");
 
-    assert!(result.content.contains("notified in the transcript"));
+    assert!(result.content.contains("completion is tracked"));
     let metadata = result.metadata.as_ref().expect("metadata");
     assert_eq!(
         metadata
-            .get("auto_notify_on_completion")
+            .get("auto_resume_on_completion")
             .and_then(Value::as_bool),
-        Some(true)
+        Some(false)
+    );
+    assert_eq!(
+        metadata.get("completion_surface").and_then(Value::as_str),
+        Some("task_status")
     );
     assert_eq!(
         metadata.get("background_policy").and_then(Value::as_str),

@@ -1099,6 +1099,11 @@ impl Engine {
                     continue;
                 }
 
+                let shell_completions = self.drain_shell_completion_events();
+                if let Some(status) = shell_completion_status_text(&shell_completions, "") {
+                    let _ = self.tx_event.send(Event::status(status)).await;
+                }
+
                 // Sub-agent completion handoff (issue #756). The model finished
                 // streaming with no tool calls — but if it has direct children
                 // still running (or completions queued from children that
@@ -1107,21 +1112,6 @@ impl Engine {
                 // resume instead of ending the turn. This fulfils the contract
                 // already documented in `prompts/constitution.md`: the parent is
                 // promised it'll see the sentinel when a child finishes.
-                let shell_completions = self.drain_shell_completion_events();
-                if !shell_completions.is_empty() {
-                    let count = shell_completions.len();
-                    self.add_session_message(shell_completion_runtime_message(&shell_completions))
-                        .await;
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Resuming turn with {count} shell completion(s)"
-                        )))
-                        .await;
-                    turn.next_step();
-                    continue;
-                }
-
                 let subagent_completions = self.drain_subagent_completion_events("").await;
                 if subagent_completions == 0 {
                     // #3216: do NOT barrier the parent on running children.
@@ -1260,20 +1250,9 @@ impl Engine {
                 // while we were running the thinking-only check, surface its
                 // sentinel rather than delaying it to the next turn.
                 let late_shell_completions = self.drain_shell_completion_events();
-                if !late_shell_completions.is_empty() {
-                    let count = late_shell_completions.len();
-                    self.add_session_message(shell_completion_runtime_message(
-                        &late_shell_completions,
-                    ))
-                    .await;
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Resuming turn with {count} late shell completion(s)"
-                        )))
-                        .await;
-                    turn.next_step();
-                    continue;
+                if let Some(status) = shell_completion_status_text(&late_shell_completions, "late")
+                {
+                    let _ = self.tx_event.send(Event::status(status)).await;
                 }
 
                 if self.drain_subagent_completion_events("late").await > 0 {
@@ -2454,53 +2433,42 @@ fn subagent_completion_runtime_message(payload: &str) -> Message {
     }
 }
 
-fn shell_completion_runtime_message(
+fn shell_completion_status_text(
     events: &[crate::tools::shell::ShellCompletionEvent],
-) -> Message {
-    let mut lines = Vec::with_capacity(events.len() + 2);
-    lines.push(
-        "This is an internal runtime event, not user input. Use these background shell completions to continue; they replace manual exec_shell_wait polling."
-            .to_string(),
-    );
-    for event in events {
-        let command = truncate_runtime_event_field(&event.command, 160);
-        let status = format!("{:?}", event.status);
-        let exit = event
-            .exit_code
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let mut line = format!(
-            "- task {} ({command}) -> {status} exit={exit} in {}ms",
-            event.task_id, event.duration_ms
-        );
-        if let Some(linked) = event.linked_task_id.as_deref() {
-            line.push_str(&format!(" linked_task={linked}"));
-        }
-        lines.push(line);
-        if event.status != crate::tools::shell::ShellStatus::Completed {
-            let stdout = truncate_runtime_event_field(&event.stdout_tail, 400);
-            let stderr = truncate_runtime_event_field(&event.stderr_tail, 400);
-            if !stdout.trim().is_empty() {
-                lines.push(format!("  stdout_tail: {stdout}"));
-            }
-            if !stderr.trim().is_empty() {
-                lines.push(format!("  stderr_tail: {stderr}"));
-            }
-        }
+    timing: &str,
+) -> Option<String> {
+    if events.is_empty() {
+        return None;
     }
-    Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: format!(
-                "<codewhale:runtime_event kind=\"shell_completion\" visibility=\"internal\">\n{}\n</codewhale:runtime_event>",
-                lines.join("\n")
-            ),
-            cache_control: None,
-        }],
+
+    let count = events.len();
+    let failed = events
+        .iter()
+        .filter(|event| event.status != crate::tools::shell::ShellStatus::Completed)
+        .count();
+    let noun = if count == 1 { "job" } else { "jobs" };
+    let prefix = if timing.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{} ", timing.trim())
+    };
+    let mut status = if failed == 0 {
+        format!("{prefix}{count} background shell {noun} completed")
+    } else {
+        format!("{prefix}{count} background shell {noun} finished ({failed} failed)")
+    };
+
+    if count == 1
+        && let Some(event) = events.first()
+    {
+        let command = truncate_runtime_status_field(&event.command, 80);
+        status.push_str(&format!(": {command}"));
     }
+
+    Some(status)
 }
 
-fn truncate_runtime_event_field(text: &str, max_chars: usize) -> String {
+fn truncate_runtime_status_field(text: &str, max_chars: usize) -> String {
     let normalized = text.replace(['\n', '\r'], " ");
     let mut chars = normalized.chars();
     let mut out = chars.by_ref().take(max_chars).collect::<String>();
@@ -2798,9 +2766,9 @@ mod tests {
     }
 
     #[test]
-    fn shell_completion_handoff_is_internal_user_message() {
-        let message =
-            shell_completion_runtime_message(&[crate::tools::shell::ShellCompletionEvent {
+    fn shell_completion_status_does_not_create_runtime_handoff() {
+        let status = shell_completion_status_text(
+            &[crate::tools::shell::ShellCompletionEvent {
                 task_id: "shell_abc".to_string(),
                 command: "cargo test -p codewhale-tui".to_string(),
                 status: crate::tools::shell::ShellStatus::Failed,
@@ -2809,19 +2777,16 @@ mod tests {
                 stdout_tail: "running tests".to_string(),
                 stderr_tail: "test failed".to_string(),
                 linked_task_id: Some("task_1".to_string()),
-            }]);
+            }],
+            "",
+        )
+        .expect("status text");
 
-        assert_eq!(message.role, "user");
-        let text = match &message.content[0] {
-            ContentBlock::Text { text, .. } => text,
-            other => panic!("expected text block, got {other:?}"),
-        };
-        assert!(text.contains("kind=\"shell_completion\""));
-        assert!(text.contains("visibility=\"internal\""));
-        assert!(text.contains("manual exec_shell_wait polling"));
-        assert!(text.contains("shell_abc"));
-        assert!(text.contains("Failed exit=101"));
-        assert!(text.contains("stderr_tail: test failed"));
+        assert!(status.contains("1 background shell job finished (1 failed)"));
+        assert!(status.contains("cargo test -p codewhale-tui"));
+        assert!(!status.contains("runtime_event"));
+        assert!(!status.contains("manual exec_shell_wait polling"));
+        assert!(!status.contains("stderr_tail"));
     }
 
     #[test]

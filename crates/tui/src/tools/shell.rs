@@ -1726,7 +1726,7 @@ impl ShellManager {
     }
 
     /// Drain finished background shell jobs that have not yet been reported to
-    /// the model/runtime transcript.
+    /// runtime status.
     pub fn drain_finished_jobs(&mut self) -> Vec<ShellCompletionEvent> {
         let mut events = Vec::new();
         for shell in self.processes.values_mut() {
@@ -2127,7 +2127,7 @@ impl ToolSpec for ExecShellTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace directory. Foreground mode is for bounded commands; use background=true or task_shell_start for work expected to take >5 seconds. Background jobs return immediately and notify the transcript on completion."
+        "Execute a shell command in the workspace directory. Foreground mode is for bounded commands; use background=true or task_shell_start for work expected to take >5 seconds. Background jobs return immediately and report completion through task/status state instead of resuming the model."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -2144,7 +2144,7 @@ impl ToolSpec for ExecShellTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return task_id (default: false). Returns immediately and notifies on completion; prefer this for commands expected to take >5 seconds, including builds, test suites, servers, CI polling, sleep, or other long-running work. Use exec_shell_wait only when you need early output, and set wait=true only at a true dependency."
+                    "description": "Run in background and return task_id (default: false). Returns immediately; completion is tracked in task/status state. Prefer this for commands expected to take >5 seconds, including builds, test suites, servers, CI polling, sleep, or other long-running work. Use exec_shell_wait only when you need early output, final output, or a true dependency barrier."
                 },
                 "interactive": {
                     "type": "boolean",
@@ -2515,11 +2515,11 @@ impl ToolSpec for ExecShellTool {
                 } else if result.status == ShellStatus::Running {
                     if backgrounded_foreground {
                         format!(
-                            "Command moved to background: {task_id_str}\n\nReturns immediately; you will be notified in the transcript when it finishes. Keep working; call exec_shell_wait only if you need early output, or with wait=true at a true dependency."
+                            "Command moved to background: {task_id_str}\n\nReturns immediately; completion is tracked in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
                         )
                     } else {
                         format!(
-                            "Background task started: {task_id_str}\n\nReturns immediately; you will be notified in the transcript when it finishes. Keep working; call exec_shell_wait only if you need early output, or with wait=true at a true dependency."
+                            "Background task started: {task_id_str}\n\nReturns immediately; completion is tracked in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
                         )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
@@ -2582,7 +2582,8 @@ impl ToolSpec for ExecShellTool {
                 });
                 metadata["backgrounded"] = json!(background || backgrounded_foreground);
                 if background || backgrounded_foreground {
-                    metadata["auto_notify_on_completion"] = json!(true);
+                    metadata["auto_resume_on_completion"] = json!(false);
+                    metadata["completion_surface"] = json!("task_status");
                     metadata["background_policy"] = json!("nonblocking");
                 }
                 if result.status == ShellStatus::TimedOut && !background && !interactive {
@@ -2977,7 +2978,7 @@ impl ToolSpec for ShellWaitTool {
                 "wait": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Snapshot the latest background output and return immediately (default). Background jobs notify the transcript automatically on completion, so normally do not wait. Set wait=true only for a deliberate barrier at a true dependency or final gate."
+                    "description": "Snapshot the latest background output and return immediately (default). Background job completions are tracked in task/status state, so normally do not wait. Set wait=true only for a deliberate barrier at a true dependency or final gate."
                 }
             },
             "required": ["task_id"]
