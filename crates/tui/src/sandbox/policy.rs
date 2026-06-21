@@ -235,23 +235,33 @@ fn resolve_git_worktree_writable_roots(root: &Path) -> Vec<PathBuf> {
 }
 
 fn resolve_gitdir_pointer(root: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(root.join(".git")).ok()?;
-    let value = contents
-        .lines()
-        .find_map(|line| line.strip_prefix("gitdir:"))?
-        .trim();
-    if value.is_empty() {
-        return None;
+    let search_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    for ancestor in search_root.ancestors() {
+        let git_file = ancestor.join(".git");
+        if !git_file.is_file() {
+            continue;
+        }
+
+        let contents = fs::read_to_string(git_file).ok()?;
+        let value = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))?
+            .trim();
+        if value.is_empty() {
+            return None;
+        }
+
+        let path = PathBuf::from(value);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            ancestor.join(path)
+        };
+
+        return resolved.canonicalize().ok();
     }
 
-    let path = PathBuf::from(value);
-    let resolved = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-
-    resolved.canonicalize().ok()
+    None
 }
 
 fn resolve_git_common_dir(git_dir: &Path) -> Option<PathBuf> {
@@ -435,6 +445,40 @@ mod tests {
             .collect();
 
         assert!(root_paths.contains(&worktree.canonicalize().expect("canonical worktree")));
+        assert!(root_paths.contains(&worktree_git_dir.canonicalize().expect("canonical gitdir")));
+        assert!(root_paths.contains(&common_git_dir.canonicalize().expect("canonical common git")));
+    }
+
+    #[test]
+    fn workspace_write_resolves_git_worktree_metadata_from_subdirectory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let common_git_dir = tmp.path().join("main-repo").join(".git");
+        let worktree_git_dir = common_git_dir.join("worktrees").join("feature");
+        let worktree = tmp.path().join("feature-worktree");
+        let nested = worktree.join("crates").join("cli");
+        std::fs::create_dir_all(&worktree_git_dir).expect("mkdir gitdir");
+        std::fs::create_dir_all(&nested).expect("mkdir nested worktree path");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .expect("write git pointer");
+        std::fs::write(worktree_git_dir.join("commondir"), "../..").expect("write commondir");
+
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            network_access: true,
+            exclude_tmpdir: true,
+            exclude_slash_tmp: true,
+        };
+
+        let root_paths: Vec<PathBuf> = policy
+            .get_writable_roots(&nested)
+            .into_iter()
+            .map(|root| root.root)
+            .collect();
+
+        assert!(root_paths.contains(&nested.canonicalize().expect("canonical nested cwd")));
         assert!(root_paths.contains(&worktree_git_dir.canonicalize().expect("canonical gitdir")));
         assert!(root_paths.contains(&common_git_dir.canonicalize().expect("canonical common git")));
     }
